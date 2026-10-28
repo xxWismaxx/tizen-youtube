@@ -77,8 +77,9 @@ jobs:
           npm run package
           npm run audit -- --release
           version="$(node -p "require('./tizen.config.json').version")"
+          # Only the Tizen 5.5+ build: the TV runs Tizen 9, and one asset leaves nothing to pick wrong.
           mv release/tube-tizen-5.5.wgt "release/tizen-youtube-${version}-tizen-5.5.wgt"
-          mv release/tube-tizen-5.0.wgt "release/tizen-youtube-${version}-tizen-5.0.wgt"
+          rm release/tube-tizen-5.0.wgt
 
       - name: Publish
         if: steps.tag.outputs.skip != 'true'
