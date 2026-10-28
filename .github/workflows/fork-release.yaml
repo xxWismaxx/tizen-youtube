@@ -1,0 +1,91 @@
+name: Fork release
+
+# Rebuilds each upstream release with the service proxy on 8098 instead of 8099,
+# because Vetro already listens on 8099 on the TV. The .wgt files keep upstream's
+# names and package id, so Tizen Homebrew installs them in place of the catalog build.
+
+on:
+  schedule:
+    - cron: '23 7 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Upstream tag to rebuild (empty = latest stable)
+        required: false
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM: SushyDev/tizen-youtube
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Pick the upstream tag
+        id: tag
+        env:
+          REQUESTED: ${{ inputs.tag }}
+        run: |
+          tag="$REQUESTED"
+          if [ -z "$tag" ]; then
+            tag="$(git -c versionsort.suffix=- ls-remote --tags --refs --sort=-v:refname "https://github.com/$UPSTREAM.git" 'v*' \
+              | awk -F/ '{print $3}' | grep -v -- - | head -n1)"
+          fi
+          [ -n "$tag" ] || { echo "::error::No upstream tag found."; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag is already released here."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out upstream
+        if: steps.tag.outputs.skip != 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ steps.tag.outputs.tag }}
+          path: upstream
+
+      - name: Move the proxy to 8098
+        if: steps.tag.outputs.skip != 'true'
+        run: sh fork/patch.sh upstream
+
+      - uses: actions/setup-node@v7
+        if: steps.tag.outputs.skip != 'true'
+        with:
+          node-version-file: upstream/.nvmrc
+          cache: npm
+          cache-dependency-path: upstream/package-lock.json
+
+      - name: Build, test and package
+        if: steps.tag.outputs.skip != 'true'
+        working-directory: upstream
+        run: |
+          npm ci
+          npm run build
+          npm test
+          npm run package
+          npm run audit -- --release
+          version="$(node -p "require('./tizen.config.json').version")"
+          mv release/tube-tizen-5.5.wgt "release/tizen-youtube-${version}-tizen-5.5.wgt"
+          mv release/tube-tizen-5.0.wgt "release/tizen-youtube-${version}-tizen-5.0.wgt"
+
+      - name: Publish
+        if: steps.tag.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release create "$TAG" upstream/release/*.wgt \
+            --target "$GITHUB_SHA" \
+            --title "$TAG (proxy on 8098)" \
+            --notes "Upstream [$TAG](https://github.com/$UPSTREAM/releases/tag/$TAG) rebuilt with the service proxy on 8098 instead of 8099. Source: upstream $TAG plus [fork/patch.sh](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/fork/patch.sh)."
